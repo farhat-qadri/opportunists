@@ -122,7 +122,9 @@ def load_full_history():
     try:
         path = os.path.join("data", "previous_application (sample).csv")
         if os.path.exists(path):
-            cols = ['SK_ID_CURR', 'NAME_CONTRACT_TYPE', 'AMT_APPLICATION', 'NAME_CONTRACT_STATUS', 'DAYS_DECISION', 'NAME_CLIENT_TYPE', 'NAME_PRODUCT_TYPE', 'DAYS_FIRST_DRAWING', 'DAYS_TERMINATION']
+            cols = ['SK_ID_CURR', 'NAME_CONTRACT_TYPE', 'AMT_APPLICATION', 'NAME_CONTRACT_STATUS', 
+                    'DAYS_DECISION', 'NAME_CLIENT_TYPE', 'NAME_PRODUCT_TYPE', 
+                    'DAYS_FIRST_DRAWING', 'DAYS_TERMINATION', 'DAYS_FIRST_DUE', 'DAYS_LAST_DUE']
             return pd.read_csv(path, usecols=cols)
     except: pass
     return pd.DataFrame()
@@ -156,12 +158,15 @@ def render_swim_lanes_assessment(history_df, current_row, currency):
         .status-Refused { border-left-color: #d62728 !important; }
         .status-Canceled { border-left-color: #888 !important; }
         .status-Pending { border-left-color: #ff9800 !important; background: rgba(255, 152, 0, 0.05) !important; }
+        
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-fade { animation: fadeIn 0.6s ease-out forwards; }
     </style>
     """, unsafe_allow_html=True)
 
     html_blocks = []
     
-    # 1. CURRENT APPLICATION ROW
+    # 1. CURRENT
     curr_type = current_row.get('NAME_CONTRACT_TYPE', 'Loan')
     curr_amt = current_row.get('AMT_CREDIT', 0)
     pred_val = "Approve" if current_row.get('EXT_SOURCE_3', 0.5) > 0.5 else "Audit"
@@ -177,7 +182,7 @@ def render_swim_lanes_assessment(history_df, current_row, currency):
         </div>
     </div>""")
 
-    # 2. DETAILED HISTORY ROWS
+    # 2. HISTORY
     if not history_df.empty:
         for _, row in history_df.head(10).iterrows(): 
             status = row['NAME_CONTRACT_STATUS']
@@ -194,14 +199,19 @@ def render_swim_lanes_assessment(history_df, current_row, currency):
             if status == "Approved":
                 first_draw = row.get('DAYS_FIRST_DRAWING', 365243)
                 term = row.get('DAYS_TERMINATION', 365243)
+                first_due = row.get('DAYS_FIRST_DUE', 365243)
+                last_due = row.get('DAYS_LAST_DUE', 365243)
                 
                 if not pd.isna(first_draw) and first_draw < 365000:
                     milestones.append(f"""<div class="lane-event"><div class="event-val">Disbursed</div></div>""")
+                    if not pd.isna(first_due) and first_due < 365000:
+                        milestones.append(f"""<div class="lane-event"><div class="event-val">1st Pay</div></div>""")
                     if not pd.isna(term) and term < 365000:
                         milestones.append(f"""<div class="lane-event"><div class="event-val" style="color:#aaa">Closed</div></div>""")
+                    elif not pd.isna(last_due) and last_due < 365000:
+                         milestones.append(f"""<div class="lane-event"><div class="event-val" style="color:#aaa">Mature</div></div>""")
                     else:
                         milestones.append(f"""<div class="lane-event"><div class="event-val" style="color:#2ca02c">Active</div></div>""")
-            
             elif status == "Refused":
                  milestones.append(f"""<div class="lane-event"><div class="event-val" style="color:#888">Closed</div></div>""")
 
@@ -219,6 +229,81 @@ def render_swim_lanes_assessment(history_df, current_row, currency):
     st.markdown(f'<div class="swim-box"><div class="swim-container">{"".join(html_blocks)}</div></div>', unsafe_allow_html=True)
 
 # --- GRAPH HELPERS ---
+def create_gauge_chart(value, title, color_hex, text_override=None, target_val=None):
+    fig = go.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = value,
+        title = {'text': title, 'font': {'size': 11, 'color': "#aaa", 'family': "Segoe UI"}},
+        number = {'font': {'size': 20, 'color': "white", 'family': "Consolas"}, 'suffix': ""}, 
+        gauge = {
+            'axis': {'range': [None, 100], 'visible': False},
+            'bar': {'color': "rgba(0,0,0,0)"},
+            'bgcolor': "rgba(0,0,0,0)",
+            'borderwidth': 0,
+            'steps': [
+                {'range': [0, 100], 'color': "rgba(255,255,255,0.08)"},
+                {'range': [0, value], 'color': color_hex} 
+            ],
+            'threshold': {
+                'line': {'color': "white", 'width': 3},
+                'thickness': 0.9,
+                'value': value
+            }
+        }
+    ))
+    
+    if text_override:
+        fig.update_traces(number={'font': {'size': 1, 'color': "rgba(0,0,0,0)"}}) 
+        fig.add_annotation(x=0.5, y=0.35, text=text_override, showarrow=False, font=dict(size=18, color="white", family="Segoe UI", weight="bold"))
+
+    if target_val is not None:
+        t_label = "Default (1)" if target_val == 1 else "Repay (0)"
+        t_color = "#d62728" if target_val == 1 else "#2ca02c"
+        fig.add_annotation(x=0.5, y=0.10, text=f"Actual: {t_label}", showarrow=False, font=dict(size=10, color=t_color))
+
+    fig.update_layout(
+        height=120, 
+        margin=dict(l=10, r=10, t=25, b=5),
+        paper_bgcolor='rgba(0,0,0,0)',
+        font={'family': "Segoe UI"}
+    )
+    return fig
+
+def create_exposure_chart(loan_val, exposure_val, currency, label_text):
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=[loan_val], y=[""], orientation='h',
+        marker_color='rgba(255,255,255,0.1)',
+        hoverinfo='none', width=0.6 
+    ))
+    fig.add_trace(go.Bar(
+        x=[exposure_val], y=[""], orientation='h',
+        marker_color='#d62728', 
+        text=f"{currency}{exposure_val:,.0f}", textposition='auto',
+        textfont=dict(color='white', size=13, family="Consolas", weight="bold"),
+        hoverinfo='text', hovertext=f"At Risk: {currency}{exposure_val:,.0f}",
+        width=0.6 
+    ))
+    fig.update_layout(
+        barmode='overlay',
+        xaxis=dict(range=[0, max(loan_val, 1)], visible=False, fixedrange=True),
+        yaxis=dict(visible=False, fixedrange=True),
+        margin=dict(l=0, r=0, t=30, b=15), 
+        height=100, 
+        title=dict(text="Est. Exposure (Loan Value at Risk)", font=dict(size=11, color="#aaa", family="Segoe UI"), x=0, y=0.98),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        showlegend=False
+    )
+    fig.add_annotation(
+        x=0, y=-0.5, 
+        text=label_text, 
+        showarrow=False,
+        xanchor='left', yanchor='top',
+        font=dict(size=10, color="#666", family="Consolas")
+    )
+    return fig
+
 def render_risk_card(title, value, max_impact, is_bad=True):
     pct = min(100, (value / max_impact) * 100) if max_impact > 0 else 0
     color = "#d62728" if is_bad else "#2ca02c"
@@ -312,51 +397,25 @@ def show(df):
     # =========================================================
     if selected_sub == "Categorical Signals":
         df = prep_risk_data(df.copy())
-        
         c_left, c_right = st.columns([1, 1], gap="medium")
-        
-        # --- LEFT PANEL ---
         with c_left:
             with st.container(border=True): 
                 st.subheader("Signal Strength")
                 st.caption("Normalized impact of categories. Click a bar to drill down.")
-                
                 sig_df = calculate_categorical_signals(df)
                 sig_df = sig_df.sort_values('Normalized', ascending=True)
-                
                 sig_df['Visual_Val'] = sig_df['Normalized'].apply(lambda x: 2 if 0 <= x < 2 else (-2 if -2 < x < 0 else x))
                 max_val = sig_df['Normalized'].abs().max()
                 axis_limit = max(10, max_val * 1.15)
-                
                 fig_sig = go.Figure()
-                fig_sig.add_trace(go.Bar(
-                    y=sig_df['Label'], 
-                    x=sig_df['Visual_Val'], 
-                    orientation='h',
-                    marker=dict(color=sig_df['Normalized'], colorscale=['#d62728', '#444', '#2ca02c'], cmid=0),
-                    text=sig_df['Normalized'].apply(lambda x: f"{'+' if x>0 else ''}{x:.1f}"),
-                    textposition='auto',
-                    width=0.7, 
-                    hoverinfo='none' 
-                ))
-                
-                fig_sig.update_layout(
-                    barmode='relative', height=600,
-                    xaxis=dict(title="Signal Weight", range=[-axis_limit, axis_limit], zeroline=True, zerolinewidth=2, zerolinecolor='white'),
-                    yaxis=dict(title="", showgrid=False, tickfont=dict(size=11), showticklabels=True),
-                    margin=dict(l=0, r=0, t=10, b=30),
-                    paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                    clickmode='event+select', showlegend=False
-                )
-                
+                fig_sig.add_trace(go.Bar(y=sig_df['Label'], x=sig_df['Visual_Val'], orientation='h', marker=dict(color=sig_df['Normalized'], colorscale=['#d62728', '#444', '#2ca02c'], cmid=0), text=sig_df['Normalized'].apply(lambda x: f"{'+' if x>0 else ''}{x:.1f}"), textposition='auto', width=0.7, hoverinfo='none'))
+                fig_sig.update_layout(barmode='relative', height=600, xaxis=dict(title="Signal Weight", range=[-axis_limit, axis_limit], zeroline=True, zerolinewidth=2, zerolinecolor='white'), yaxis=dict(title="", showgrid=False, tickfont=dict(size=11), showticklabels=True), margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', clickmode='event+select', showlegend=False)
                 selected = st.plotly_chart(fig_sig, use_container_width=True, on_select="rerun", selection_mode="points", key="sig_chart", config={'displayModeBar': False})
-                
                 active_cat = None
                 if selected and selected["selection"]["points"]:
                     clicked_idx = selected["selection"]["points"][0]["point_index"]
                     active_cat = sig_df.iloc[clicked_idx]['Feature']
 
-        # --- RIGHT PANEL ---
         with c_right:
             is_hour_cat = active_cat and ("HOUR" in active_cat)
             with st.sidebar:
@@ -370,53 +429,24 @@ def show(df):
                     meta = get_meta(active_cat)
                     st.subheader(f"Deep Dive: {meta['label']}")
                     st.markdown(f"*{meta['desc']}*")
-                    
                     cat_stats = df.groupby(active_cat).agg(Count=('TARGET', 'count'), Risk=('TARGET', 'mean'), Value=('AMT_CREDIT', 'sum')).reset_index()
-                    
-                    if sort_option == "Risk":
-                        cat_stats = cat_stats.sort_values('Risk', ascending=True)
-                        x_vals = cat_stats[active_cat].astype(str).tolist()
-                    elif sort_option == "Volume":
-                        cat_stats = cat_stats.sort_values('Count', ascending=False)
-                        x_vals = cat_stats[active_cat].astype(str).tolist()
+                    if sort_option == "Risk": cat_stats = cat_stats.sort_values('Risk', ascending=True); x_vals = cat_stats[active_cat].astype(str).tolist()
+                    elif sort_option == "Volume": cat_stats = cat_stats.sort_values('Count', ascending=False); x_vals = cat_stats[active_cat].astype(str).tolist()
                     else: 
-                        if "WEEKDAY" in active_cat:
-                            days = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
-                            cat_stats[active_cat] = pd.Categorical(cat_stats[active_cat], categories=days, ordered=True)
-                            cat_stats = cat_stats.sort_values(active_cat)
-                            x_vals = cat_stats[active_cat].astype(str).tolist()
-                        elif "HOUR" in active_cat:
-                            cat_stats[active_cat] = pd.to_numeric(cat_stats[active_cat], errors='coerce')
-                            cat_stats = cat_stats.sort_values(active_cat)
-                            x_vals = cat_stats[active_cat].tolist()
-                        elif "EXT_SOURCE_3_BIN" in active_cat:
-                             order = ["1 - Very Low", "2 - Low", "3 - Medium", "4 - High", "5 - Very High"]
-                             cat_stats[active_cat] = pd.Categorical(cat_stats[active_cat], categories=order, ordered=True)
-                             cat_stats = cat_stats.sort_values(active_cat)
-                             x_vals = cat_stats[active_cat].astype(str).tolist()
-                        else:
-                            cat_stats = cat_stats.sort_values(active_cat)
-                            x_vals = cat_stats[active_cat].astype(str).tolist()
-                    
-                    total_n = cat_stats['Count'].sum()
-                    avg_risk = cat_stats['Risk'].mean()
-                    
+                        if "WEEKDAY" in active_cat: days = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]; cat_stats[active_cat] = pd.Categorical(cat_stats[active_cat], categories=days, ordered=True); cat_stats = cat_stats.sort_values(active_cat); x_vals = cat_stats[active_cat].astype(str).tolist()
+                        elif "HOUR" in active_cat: cat_stats[active_cat] = pd.to_numeric(cat_stats[active_cat], errors='coerce'); cat_stats = cat_stats.sort_values(active_cat); x_vals = cat_stats[active_cat].tolist()
+                        elif "EXT_SOURCE_3_BIN" in active_cat: order = ["1 - Very Low", "2 - Low", "3 - Medium", "4 - High", "5 - Very High"]; cat_stats[active_cat] = pd.Categorical(cat_stats[active_cat], categories=order, ordered=True); cat_stats = cat_stats.sort_values(active_cat); x_vals = cat_stats[active_cat].astype(str).tolist()
+                        else: cat_stats = cat_stats.sort_values(active_cat); x_vals = cat_stats[active_cat].astype(str).tolist()
+                    total_n = cat_stats['Count'].sum(); avg_risk = cat_stats['Risk'].mean()
                     st.markdown(f"""<div style="background-color:rgba(255,255,255,0.05); padding:15px; border-radius:8px; border:1px solid rgba(255,255,255,0.1); margin-bottom:20px; display:flex; justify-content:space-around; text-align:center;"><div><div style="color:#888; font-size:0.8em;">APPLICANTS</div><div style="font-size:1.2em; font-weight:bold;">{total_n:,}</div></div><div><div style="color:#888; font-size:0.8em;">AVG RISK</div><div style="font-size:1.2em; font-weight:bold; color:#ff9800;">{avg_risk:.1%}</div></div><div><div style="color:#888; font-size:0.8em;">PORTFOLIO VALUE</div><div style="font-size:1.2em; font-weight:bold;">{currency}{cat_stats['Value'].sum()/1e6:.1f}M</div></div></div>""", unsafe_allow_html=True)
-                    
                     fig_det = go.Figure()
                     fig_det.add_trace(go.Scatter(x=x_vals, y=cat_stats['Risk'], name="Default Rate", line=dict(color='#ff9800', width=3), mode='lines+markers', yaxis='y2', hovertemplate="<b>%{x}</b><br>Risk: %{y:.1%}<extra></extra>"))
                     fig_det.add_trace(go.Bar(x=x_vals, y=cat_stats['Count'], name="Volume", marker_color='rgba(255,255,255,0.2)', hovertemplate="<b>%{x}</b><br>Count: %{y:,}<extra></extra>"))
-                    
                     layout_args = dict(title="Sub-Category Breakdown", yaxis=dict(title="Volume", showgrid=False), yaxis2=dict(title="Default Risk", overlaying='y', side='right', showgrid=False, tickformat='.0%'), xaxis=dict(showgrid=False, type='category', categoryorder='array', categoryarray=x_vals), legend=dict(orientation="h", y=1.1), height=450, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', hoverlabel=dict(bgcolor="#222", font_size=13, font_family="Consolas"))
                     if "HOUR" in active_cat: layout_args['xaxis'] = dict(showgrid=False, tickmode='linear', dtick=3)
                     fig_det.update_layout(**layout_args)
                     st.plotly_chart(fig_det, use_container_width=True, config={'displayModeBar': False})
-                    
-                    highest_risk = cat_stats.loc[cat_stats['Risk'].idxmax()]
-                    h_name = str(highest_risk[active_cat]).title()
-                    h_rate = highest_risk['Risk']
-                    global_mean = df['TARGET'].mean()
-                    h_lift = highest_risk['Risk'] / global_mean if global_mean > 0 else 0
+                    highest_risk = cat_stats.loc[cat_stats['Risk'].idxmax()]; h_name = str(highest_risk[active_cat]).title(); h_rate = highest_risk['Risk']; global_mean = df['TARGET'].mean(); h_lift = highest_risk['Risk'] / global_mean if global_mean > 0 else 0
                     st.markdown(f"""<div style="background-color:rgba(255,255,255,0.02); padding:12px; border-left:3px solid #ff9800; border-radius:4px; font-size:0.9em; color:#ccc;">Applicants in the <b>{h_name}</b> segment show the highest default likelihood ({h_rate:.1%}), which is <b>{h_lift:.1f}x</b> the portfolio average.</div>""", unsafe_allow_html=True)
                 else:
                     render_system_overview(sig_df)
@@ -428,7 +458,9 @@ def show(df):
         with st.sidebar:
             st.markdown('<div class="sidebar-section">View Options</div>', unsafe_allow_html=True)
             show_profile = st.toggle("Show Applicant Profile", value=True)
-            show_rel = st.toggle("Show Relationship (History)", value=True) 
+            
+            # UPDATED: Defaults set to False
+            show_rel = st.toggle("Show Relationship (History)", value=False) 
             show_portfolio = st.toggle("Show Portfolio Comparison", value=False)
             
         risk_df = prep_risk_data(df.copy())
@@ -443,34 +475,66 @@ def show(df):
             return
         row = cohort.iloc[0]
         
+        # --- STATE SYNC LOGIC ---
+        if 'last_app_id' not in st.session_state or st.session_state['last_app_id'] != search_id:
+            st.session_state['last_app_id'] = search_id
+            st.session_state['s_age'] = int(row.get('AGE', 30))
+            st.session_state['s_ref'] = float(row.get('PREV_REFUSAL_RATE', 0.0))
+            st.session_state['s_ann'] = int(row.get('PREV_AVG_ANNUITY', 0))
+            st.session_state['s_ext1'] = float(row.get('EXT_SOURCE_1', 0.5)) if not pd.isna(row.get('EXT_SOURCE_1')) else 0.5
+            st.session_state['s_ext2'] = float(row.get('EXT_SOURCE_2', 0.5)) if not pd.isna(row.get('EXT_SOURCE_2')) else 0.5
+            st.session_state['s_ext3'] = float(row.get('EXT_SOURCE_3', 0.5)) if not pd.isna(row.get('EXT_SOURCE_3')) else 0.5
+            st.session_state['s_cred'] = int(row.get('AMT_CREDIT', 100000))
+            st.session_state['s_car'] = (row.get('FLAG_OWN_CAR', 'N') == 'Y')
+            
+            edu_map = ["Higher education", "Secondary / secondary special", "Lower secondary"]
+            curr_edu = row.get('NAME_EDUCATION_TYPE', edu_map[1])
+            try: idx_edu = edu_map.index(curr_edu)
+            except: idx_edu = 1
+            st.session_state['s_edu'] = edu_map[idx_edu]
+
+            inc_map = ["Working", "Commercial associate", "State servant", "Pensioner", "Unemployed"]
+            curr_inc = row.get('NAME_INCOME_TYPE', "Working")
+            try: idx_inc = inc_map.index(curr_inc)
+            except: idx_inc = 0
+            st.session_state['s_inc'] = inc_map[idx_inc]
+        
         if show_profile:
             st.markdown("#### Applicant Profile")
             with st.container(border=True):
-                dp1, dp2, dp3, dp4 = st.columns(4)
+                # Updated to 5 columns
+                dp1, dp2, dp3, dp4, dp5 = st.columns([0.7, 1.3, 1, 1, 1])
                 dp1.metric("Age / Gender", f"{row.get('AGE', 'N/A')} / {row.get('CODE_GENDER', 'N/A')}")
                 edu = row.get('NAME_EDUCATION_TYPE', 'N/A').replace(" / secondary special", "")
                 dp2.metric("Education", edu)
                 dp3.metric("Income Type", row.get('NAME_INCOME_TYPE', 'N/A'))
                 dp4.metric("Total Income", f"{currency}{row.get('AMT_INCOME_TOTAL', 0):,.0f}")
+                
+                # New "Current Status" metric
+                status_val = row.get('NAME_CONTRACT_STATUS', 'Pending')
+                dp5.metric("Current Status", status_val)
 
         # --- APPLICANT RELATIONSHIP (SWIM LANES) ---
         if show_rel:
             st.write("")
-            st.markdown("#### Applicant Relationship")
-            with st.container(border=True):
+            with st.expander("Applicant Relationship", expanded=True):
                 full_hist = load_full_history()
                 history_df = get_applicant_history(search_id, full_hist)
                 
-                # Metrics Top
-                total_hist = len(history_df)
+                # Metrics (Expanded to 5)
+                rejected_hist = len(history_df[history_df['NAME_CONTRACT_STATUS'] == 'Refused']) if not history_df.empty else 0
                 approved_hist = len(history_df[history_df['NAME_CONTRACT_STATUS'] == 'Approved']) if not history_df.empty else 0
+                total_hist = len(history_df)
                 
-                m1, m2, m3 = st.columns(3)
+                rel_value = history_df[history_df['NAME_CONTRACT_STATUS'] == 'Approved']['AMT_APPLICATION'].sum() if not history_df.empty else 0
+                
+                m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Historical Applications", total_hist)
                 m2.metric("Past Approvals", approved_hist)
-                m3.metric("Relationship Age", f"{abs(int(history_df['DAYS_DECISION'].min())):,} days" if not history_df.empty else "New Client")
+                m3.metric("Past Rejections", rejected_hist)
+                m4.metric("Relationship Age", f"{abs(int(history_df['DAYS_DECISION'].min())):,} days" if not history_df.empty else "New Client")
+                m5.metric("Relationship Value", f"{currency}{rel_value:,.0f}")
                 
-                # Render Swim Lanes
                 render_swim_lanes_assessment(history_df, row, currency)
 
         if show_portfolio:
@@ -489,25 +553,19 @@ def show(df):
         with c_reset:
             st.write("")
             if st.button("Reset to Actuals", type="secondary", use_container_width=True):
-                # Reset all session state variables
                 st.session_state['s_age'] = int(row.get('AGE', 30))
                 st.session_state['s_ref'] = float(row.get('PREV_REFUSAL_RATE', 0.0))
                 st.session_state['s_ann'] = int(row.get('PREV_AVG_ANNUITY', 0))
-                
-                # Reset all 3 EXT scores
                 st.session_state['s_ext1'] = float(row.get('EXT_SOURCE_1', 0.5)) if not pd.isna(row.get('EXT_SOURCE_1')) else 0.5
                 st.session_state['s_ext2'] = float(row.get('EXT_SOURCE_2', 0.5)) if not pd.isna(row.get('EXT_SOURCE_2')) else 0.5
                 st.session_state['s_ext3'] = float(row.get('EXT_SOURCE_3', 0.5)) if not pd.isna(row.get('EXT_SOURCE_3')) else 0.5
-                
                 st.session_state['s_cred'] = int(row.get('AMT_CREDIT', 100000))
                 st.session_state['s_car'] = (row.get('FLAG_OWN_CAR', 'N') == 'Y')
-                
                 edu_map = ["Higher education", "Secondary / secondary special", "Lower secondary"]
                 curr_edu = row.get('NAME_EDUCATION_TYPE', edu_map[1])
                 try: idx_edu = edu_map.index(curr_edu)
                 except: idx_edu = 1
                 st.session_state['s_edu'] = edu_map[idx_edu]
-                
                 inc_map = ["Working", "Commercial associate", "State servant", "Pensioner", "Unemployed"]
                 curr_inc = row.get('NAME_INCOME_TYPE', "Working")
                 try: idx_inc = inc_map.index(curr_inc)
@@ -515,7 +573,7 @@ def show(df):
                 st.session_state['s_inc'] = inc_map[idx_inc]
                 st.rerun()
 
-        st.divider()
+        st.write("")
         header_area = st.empty()
         base_score = 50.0
         current_risk_adds = 0.0
@@ -532,8 +590,6 @@ def show(df):
         with r1:
             with st.container(border=True):
                 st.markdown("**Age Factor**")
-                value_age = int(row.get('AGE', 30))
-                if 's_age' not in st.session_state: st.session_state['s_age'] = value_age
                 in_age = st.slider("Applicant Age", 20, 70, key="s_age")
                 impact_age = max(0, (70 - in_age) * 0.3)
                 render_risk_card("Age Impact", impact_age, 15, is_bad=True)
@@ -543,8 +599,6 @@ def show(df):
         with r2:
             with st.container(border=True):
                 st.markdown("**Prev. Refusals**")
-                value_ref = float(row.get('PREV_REFUSAL_RATE', 0.0))
-                if 's_ref' not in st.session_state: st.session_state['s_ref'] = value_ref
                 in_ref = st.slider("Refusal Rate", 0.0, 1.0, step=0.1, format="%.1f", key="s_ref")
                 impact_ref = in_ref * 20
                 render_risk_card("Refusal Impact", impact_ref, 20, is_bad=True)
@@ -555,10 +609,6 @@ def show(df):
             with st.container(border=True):
                 st.markdown("**Education**")
                 opts_edu = ["Higher education", "Secondary / secondary special", "Lower secondary"]
-                curr_edu = row.get('NAME_EDUCATION_TYPE', opts_edu[1])
-                try: idx_edu = opts_edu.index(curr_edu)
-                except: idx_edu = 1
-                if 's_edu' not in st.session_state: st.session_state['s_edu'] = opts_edu[idx_edu]
                 in_edu = st.selectbox("Level", opts_edu, key="s_edu", label_visibility="visible")
                 if in_edu == "Lower secondary": impact_edu = 15.0
                 elif in_edu == "Secondary / secondary special": impact_edu = 8.0
@@ -571,10 +621,6 @@ def show(df):
             with st.container(border=True):
                 st.markdown("**Employment**")
                 opts_inc = ["Working", "Commercial associate", "State servant", "Pensioner", "Unemployed"]
-                curr_inc = row.get('NAME_INCOME_TYPE', "Working")
-                try: idx_inc = opts_inc.index(curr_inc)
-                except: idx_inc = 0
-                if 's_inc' not in st.session_state: st.session_state['s_inc'] = opts_inc[idx_inc]
                 in_inc = st.selectbox("Type", opts_inc, key="s_inc")
                 if in_inc == "Unemployed": impact_inc = 20.0
                 elif in_inc == "Working": impact_inc = 5.0
@@ -584,7 +630,7 @@ def show(df):
                 if impact_inc > 5: risk_drivers.append(("Employment Status", impact_inc))
 
         st.write("")
-        st.markdown("### GREEN LIGHT BOOSTERS (Mitigants)")
+        st.markdown("### GREEN LIGHT BOOSTERS (Risk Mitigants)")
 
         g1, g2, g3 = st.columns(3)
 
@@ -593,37 +639,20 @@ def show(df):
                 st.markdown("**History Annuity**")
                 value_ann = int(row.get('PREV_AVG_ANNUITY', 0))
                 safe_max_ann = max(100000, value_ann * 2)
-                if 's_ann' not in st.session_state: st.session_state['s_ann'] = value_ann
-                in_ann = st.number_input("Avg Prev Annuity ($)", 0, safe_max_ann, step=1000, key="s_ann")
+                in_ann = st.number_input(f"Avg Prev Annuity ({currency})", 0, safe_max_ann, step=1000, key="s_ann")
                 boost_ann = min(15.0, (in_ann / 30000) * 15)
                 render_risk_card("Annuity Boost", boost_ann, 15, is_bad=False)
                 current_risk_subs += boost_ann
                 if boost_ann > 5: risk_mitigants.append(("Strong Annuity History", boost_ann))
 
-        # --- UPDATED: 3 EXTERNAL SOURCES SLIDERS ---
         with g2:
             with st.container(border=True):
                 st.markdown("**External Credit Scores**")
-                
-                # Fetch actuals or default to 0.5
-                v1 = float(row.get('EXT_SOURCE_1', 0.5)) if not pd.isna(row.get('EXT_SOURCE_1')) else 0.5
-                v2 = float(row.get('EXT_SOURCE_2', 0.5)) if not pd.isna(row.get('EXT_SOURCE_2')) else 0.5
-                v3 = float(row.get('EXT_SOURCE_3', 0.5)) if not pd.isna(row.get('EXT_SOURCE_3')) else 0.5
-                
-                # Initialize session state if not present
-                if 's_ext1' not in st.session_state: st.session_state['s_ext1'] = v1
-                if 's_ext2' not in st.session_state: st.session_state['s_ext2'] = v2
-                if 's_ext3' not in st.session_state: st.session_state['s_ext3'] = v3
-                
-                # 3 Mini Sliders
                 s1 = st.slider("Source 1", 0.0, 1.0, step=0.01, key="s_ext1")
                 s2 = st.slider("Source 2", 0.0, 1.0, step=0.01, key="s_ext2")
                 s3 = st.slider("Source 3", 0.0, 1.0, step=0.01, key="s_ext3")
-                
-                # Combined Impact Logic (Average)
                 avg_score = (s1 + s2 + s3) / 3
                 boost_ext = avg_score * 20
-                
                 render_risk_card("Trust Boost", boost_ext, 20, is_bad=False)
                 current_risk_subs += boost_ext
                 if boost_ext > 5: risk_mitigants.append(("High External Scores", boost_ext))
@@ -633,53 +662,90 @@ def show(df):
                 st.markdown("**Credit Amount**")
                 value_cred = int(row.get('AMT_CREDIT', 100000))
                 safe_max_c = max(2000000, value_cred * 2)
-                if 's_cred' not in st.session_state: st.session_state['s_cred'] = value_cred
-                in_cred = st.number_input("Current Credit ($)", 0, safe_max_c, step=10000, key="s_cred")
-                value_car = row.get('FLAG_OWN_CAR', 'N') == 'Y'
-                if 's_car' not in st.session_state: st.session_state['s_car'] = value_car
+                in_cred = st.number_input(f"Current Credit ({currency})", 0, safe_max_c, step=10000, key="s_cred")
                 in_car = st.toggle("Owns Car?", key="s_car")
                 boost_car = 10.0 if in_car else 0.0
                 render_risk_card("Asset Boost", boost_car, 10, is_bad=False)
                 current_risk_subs += boost_car
                 if boost_car > 0: risk_mitigants.append(("Asset Ownership", boost_car))
 
-        # --- 6. HEADER RENDER ---
+        # --- 6. HEADER RENDER WITH GAUGES ---
         final_score = max(0, min(100, base_score + current_risk_adds - current_risk_subs))
         est_exposure = in_cred * (final_score / 100)
         
         if final_score < 40:
-            theme_color, risk_label, approval_prob = "#2ca02c", "LOW RISK", "High (85%)"
+            risk_label, risk_color = "LOW RISK", "#2ca02c"
+            approval_prob_val = 85.0
         elif final_score < 70:
-            theme_color, risk_label, approval_prob = "#ff9800", "MEDIUM RISK", "Medium (50%)"
+            risk_label, risk_color = "MEDIUM RISK", "#ff9800"
+            approval_prob_val = 50.0
         else:
-            theme_color, risk_label, approval_prob = "#d62728", "HIGH RISK", "Low (15%)"
+            risk_label, risk_color = "HIGH RISK", "#d62728"
+            approval_prob_val = 15.0
+
+        if approval_prob_val < 20: prob_segment = "Lowest"
+        elif approval_prob_val < 40: prob_segment = "Low"
+        elif approval_prob_val < 60: prob_segment = "Medium"
+        elif approval_prob_val < 80: prob_segment = "High"
+        else: prob_segment = "Highest"
+
+        actual_target = row.get('TARGET', None)
+        outcome_html = ""
+        if actual_target == 1:
+            outcome_html = " <span style='color:rgba(214, 39, 40, 0.5); font-size: 0.8em;'>| DEFAULTER</span>"
+        elif actual_target == 0:
+            outcome_html = " <span style='color:rgba(44, 160, 44, 0.5); font-size: 0.8em;'>| REPAYER</span>"
 
         risk_drivers.sort(key=lambda x: x[1], reverse=True)
         risk_mitigants.sort(key=lambda x: x[1], reverse=True)
-        
         driver_text = f"Primary risk driven by <b>{risk_drivers[0][0]}</b>." if risk_drivers else "No major risk flags detected."
         mitigant_text = f"Partially offset by <b>{risk_mitigants[0][0]}</b>." if risk_mitigants else "Limited mitigating factors present."
-        insight_text = f"{driver_text} {mitigant_text}"
+        
+        narrative_p1 = f"The applicant presents a {risk_label.lower().replace('_', ' ')} profile (Score: {final_score:.1f}), primarily influenced by {driver_text.split('by ')[-1].replace('.', '')}."
+        narrative_p2 = f"However, creditworthiness is supported by {mitigant_text.split('by ')[-1].replace('.', '')}, which provides essential stability to the proposal."
+        
+        all_factors = []
+        if risk_drivers: all_factors.append(f"<b>Risk Factors:</b> {', '.join([x[0] for x in risk_drivers])}")
+        if risk_mitigants: all_factors.append(f"<b>Risk Mitigants:</b> {', '.join([x[0] for x in risk_mitigants])}")
+        narrative_details = "<br>".join(all_factors)
+        
+        # LOGIC FOR EXPOSURE LABEL
+        if in_cred > 0:
+            exp_label = f"Loan Value: {currency}{in_cred:,.0f}"
+        else:
+            status_val = row.get('NAME_CONTRACT_STATUS', 'Audit')
+            if pd.isna(status_val): status_val = "Audit"
+            exp_label = f"Decision Pending: {status_val}"
 
         with header_area.container():
-            st.markdown(f"""
-            <div style="border: 1px solid rgba(255,255,255,0.1); border-left: 6px solid {theme_color}; background: linear-gradient(90deg, rgba(255,255,255,0.03) 0%, rgba(0,0,0,0) 100%); padding: 20px; border-radius: 8px; margin-bottom: 25px; font-family: 'Segoe UI', sans-serif;">
-                <div style="display:flex; justify-content: space-between; align-items: flex-start;">
-                    <div>
-                        <div style="font-size: 0.85rem; color: #888; text-transform: uppercase; letter-spacing: 1px;">Risk Analysis Simulation</div>
-                        <div style="font-size: 2.2rem; font-weight: 600; color: #fff; line-height: 1.2;">{risk_label} <span style="font-size:1rem; color:{theme_color}">({final_score:.1f}/100)</span></div>
-                        <div style="margin-top: 8px; font-size: 0.95rem; color: #ccc; font-style: italic;">"{insight_text}"</div>
-                    </div>
-                    <div style="text-align: right; display:flex; gap:30px; margin-top: 5px;">
-                        <div>
-                            <div style="font-size: 0.8rem; color: #888;">Approval Probability</div>
-                            <div style="font-size: 1.2rem; color: #fff; font-weight:500;">{approval_prob}</div>
-                        </div>
-                        <div>
-                            <div style="font-size: 0.8rem; color: #888;">Est. Exposure</div>
-                            <div style="font-size: 1.2rem; color: #fff; font-weight:500;">{currency}{est_exposure:,.0f}</div>
+            with st.container(border=True):
+                st.markdown('<div class="animate-fade">', unsafe_allow_html=True)
+                
+                c_text, c_score, c_prob, c_exp = st.columns([2.2, 0.9, 0.9, 0.8])
+                
+                with c_text:
+                    st.markdown(f"<div style='font-size: 0.85rem; color: #888; text-transform: uppercase; margin-bottom:5px;'>CREDIT RISK ASSESSMENT</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='font-size: 1.8rem; font-weight: 600; color: #fff; line-height:1;'>{risk_label}{outcome_html}</div>", unsafe_allow_html=True)
+                    st.markdown(f"""
+                    <div style='margin-top: 15px; font-size: 0.9rem; color: #ccc; line-height: 1.5; font-family: "Segoe UI", sans-serif;'>
+                        {narrative_p1} {narrative_p2}
+                        <div style='margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.1); font-size: 0.85rem; color: #aaa;'>
+                            {narrative_details}
                         </div>
                     </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                    """, unsafe_allow_html=True)
+
+                with c_score:
+                    fig_score = create_gauge_chart(final_score, "Risk Score", risk_color)
+                    st.plotly_chart(fig_score, use_container_width=True, config={'displayModeBar': False})
+
+                with c_prob:
+                    prob_color = "#2ca02c" if approval_prob_val > 70 else "#ff9800" if approval_prob_val > 40 else "#d62728"
+                    fig_prob = create_gauge_chart(approval_prob_val, "Approval Probability", prob_color, text_override=prob_segment, target_val=actual_target)
+                    st.plotly_chart(fig_prob, use_container_width=True, config={'displayModeBar': False})
+                
+                with c_exp:
+                    fig_exp = create_exposure_chart(in_cred, est_exposure, currency, exp_label)
+                    st.plotly_chart(fig_exp, use_container_width=True, config={'displayModeBar': False})
+                
+                st.markdown('</div>', unsafe_allow_html=True)

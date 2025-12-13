@@ -13,7 +13,6 @@
 
 import streamlit as st
 from streamlit_option_menu import option_menu
-# FIXED: Removed 'drivers' from imports
 from modules import data_engine, landscape, assessment, deep_dive
 import os
 import pandas as pd
@@ -81,7 +80,7 @@ st.markdown("""
         .status-pill {
             font-size: 0.7rem; padding: 3px 8px; border-radius: 12px;
             font-weight: 600; text-transform: uppercase; letter-spacing: 1px;
-            min-width: 70px; text-align: center;
+            min-width: 60px; text-align: center;
         }
         .status-ok { color: #4caf50; background: rgba(76, 175, 80, 0.1); border: 1px solid rgba(76, 175, 80, 0.2); }
         .status-miss { color: #d62728; background: rgba(214, 39, 40, 0.1); border: 1px solid rgba(214, 39, 40, 0.2); }
@@ -105,8 +104,8 @@ with st.sidebar:
 # ---------------------------------------------------------
 selected = option_menu(
     menu_title=None,
-    # FIXED: Removed "Risk Drivers" from options
-    options=["Data Sources", "Risk Landscape", "Deep Dive", "Risk Assessment"],
+    # UPDATED: "Data Explorer" instead of "Deep Dive"
+    options=["Setup Options", "Risk Landscape", "Data Explorer", "Credit Risk Assessment"],
     default_index=0, 
     orientation="horizontal",
     styles={
@@ -125,8 +124,8 @@ selected = option_menu(
 # MAIN MODULE CONTROLLER
 # ---------------------------------------------------------
 
-if selected == "Data Sources":
-    st.title("Data Management")
+if selected == "Setup Options":
+    st.title("Setup Options")
     
     settings = data_engine.load_settings()
     last_update = settings.get("last_refresh", "Never")
@@ -156,7 +155,7 @@ if selected == "Data Sources":
             for name, state in status.items():
                 meta_info = "N/A"
                 if "Available" in state:
-                    css_class, label, icon = "status-ok", "ONLINE", "●"
+                    css_class, label = "status-ok", "ONLINE"
                     fname = file_map.get(name)
                     try:
                         if fname and os.path.exists(os.path.join("data", fname)):
@@ -166,7 +165,7 @@ if selected == "Data Sources":
                     except:
                         meta_info = "Ready"
                 else:
-                    css_class, label, icon = "status-miss", "MISSING", "○"
+                    css_class, label = "status-miss", "MISSING"
                 
                 display_name = name.replace("Raw - ", "").replace("Cleaned - ", "")
                 
@@ -176,7 +175,7 @@ if selected == "Data Sources":
                         <span class="status-name">{display_name}</span>
                         <span class="status-meta">{meta_info}</span>
                     </div>
-                    <span class="status-pill {css_class}">{icon} {label}</span>
+                    <span class="status-pill {css_class}">{label}</span>
                 </div>
                 """)
             
@@ -202,7 +201,7 @@ if selected == "Data Sources":
                 data_engine.save_setting("currency", sym_map.get(new_curr, ""))
                 data_engine.save_setting("currency_label", new_curr)
                 data_engine.save_setting("include_unknown", new_unknown)
-                st.toast("Settings updated. Refreshing...", icon="⚙️")
+                st.toast("Settings updated. Refreshing...")
                 st.rerun()
 
     # --- CARD 3: PROCESSING ---
@@ -231,10 +230,20 @@ if selected == "Data Sources":
         log_html = []
         for line in logs:
             color = "#ccc"
-            if "✅" in line: color = "#4caf50"
-            elif "❌" in line: color = "#f44336"
-            elif "Warning" in line: color = "#ff9800"
-            log_html.append(f"<div style='font-family:monospace; color:{color}; font-size:0.85em; border-bottom:1px solid #222; padding:2px;'>{line}</div>")
+            prefix = "[INFO]"
+            if "✅" in line: 
+                color = "#4caf50"
+                prefix = "[OK]"
+                line = line.replace("✅", "").strip()
+            elif "❌" in line: 
+                color = "#f44336"
+                prefix = "[ERR]"
+                line = line.replace("❌", "").strip()
+            elif "Warning" in line: 
+                color = "#ff9800"
+                prefix = "[WRN]"
+            
+            log_html.append(f"<div style='font-family:monospace; color:{color}; font-size:0.85em; border-bottom:1px solid #222; padding:2px;'><b>{prefix}</b> {line}</div>")
         
         st.markdown("".join(log_html), unsafe_allow_html=True)
 
@@ -245,17 +254,15 @@ elif selected == "Risk Landscape":
     st.title("Risk Landscape") 
     df = data_engine.load_data()
     if df is not None: landscape.show(df)
-    else: st.warning("⚠️ Dataset not found. Please go to **Data Sources**.")
+    else: st.warning("⚠️ Dataset not found. Please go to **Setup Options**.")
 
-# FIXED: Removed elif block for Risk Drivers
-
-elif selected == "Deep Dive":
+elif selected == "Data Explorer": # UPDATED
     df = data_engine.load_data()
     if df is not None: deep_dive.show(df)
-    else: st.warning("⚠️ Dataset not found. Please go to **Data Sources**.")
+    else: st.warning("⚠️ Dataset not found. Please go to **Setup Options**.")
 
-elif selected == "Risk Assessment":
-    st.title("Individual Credit Risk Assessment")
+elif selected == "Credit Risk Assessment":
+    st.title("Credit Risk Assessment")
     df = data_engine.load_data()
     if df is not None: assessment.show(df)
-    else: st.warning("⚠️ Dataset not found. Please go to **Data Sources**.")
+    else: st.warning("⚠️ Dataset not found. Please go to **Setup Options**.")
