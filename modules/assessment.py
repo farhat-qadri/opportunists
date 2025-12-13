@@ -84,7 +84,11 @@ def prep_risk_data(df):
     except: return df
 
 @st.cache_data(show_spinner=False)
-def calculate_categorical_signals(df):
+def calculate_categorical_signals(df, include_unknown=True):
+    """
+    Calculates signal strength for categorical variables.
+    Supports filtering out 'Unknown' values based on user preference.
+    """
     base_cats = df.select_dtypes(include=['object']).columns.tolist()
     for col in ['REGION_RATING_CLIENT', 'HOUR_APPR_PROCESS_START', 'WEEKDAY_APPR_PROCESS_START', 'FLAG_OWN_CAR', 'FLAG_OWN_REALTY', 'EXT_SOURCE_3_BIN']:
         if col in df.columns and col not in base_cats: base_cats.append(col)
@@ -95,10 +99,22 @@ def calculate_categorical_signals(df):
     
     for col in cat_cols:
         group = df.groupby(col)['TARGET'].mean()
+        
+        # --- FILTER LOGIC ---
+        if not include_unknown:
+            exclude_vals = ['XNA', 'Unknown', 'nan']
+            group = group.drop([x for x in exclude_vals if x in group.index], errors='ignore')
+
         if len(group) > 1:
             signal_strength = group.max() - group.min()
             largest_group = df[col].value_counts().idxmax()
-            largest_group_risk = group[largest_group]
+            
+            # Ensure largest group exists in filtered data
+            if largest_group in group:
+                largest_group_risk = group[largest_group]
+            else:
+                largest_group_risk = group.mean() # Fallback
+
             global_risk = df['TARGET'].mean()
             direction = 1 if largest_group_risk < global_risk else -1
             meta = get_meta(col)
@@ -137,13 +153,7 @@ def get_applicant_history(sk_id_curr, full_hist):
 def render_swim_lanes_assessment(history_df, current_row, currency):
     st.markdown("""
     <style>
-        .swim-box {
-            background-color: rgba(255,255,255,0.02);
-            border: 1px solid rgba(255,255,255,0.05);
-            border-radius: 6px;
-            padding: 15px;
-            margin-top: 5px;
-        }
+        .swim-box { background-color: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 6px; padding: 15px; margin-top: 5px; }
         .swim-container { font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; gap: 6px; }
         .swim-lane { display: flex; align-items: center; background: rgba(255, 255, 255, 0.03); border-radius: 3px; padding: 6px 10px; border-left: 3px solid #555; height: 45px; }
         .lane-meta { width: 120px; border-right: 1px solid rgba(255,255,255,0.1); padding-right: 8px; margin-right: 12px; flex-shrink: 0; line-height: 1.1; }
@@ -153,12 +163,10 @@ def render_swim_lanes_assessment(history_df, current_row, currency):
         .lane-line { position: absolute; top: 50%; left: 0; right: 0; height: 1px; background: rgba(255,255,255,0.15); z-index: 0; }
         .lane-event { position: relative; z-index: 1; text-align: center; background: #0e1117; padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); min-width: 50px; }
         .event-val { font-size: 0.7rem; color: #ddd; font-weight: 500; }
-        
         .status-Approved { border-left-color: #2ca02c !important; }
         .status-Refused { border-left-color: #d62728 !important; }
         .status-Canceled { border-left-color: #888 !important; }
         .status-Pending { border-left-color: #ff9800 !important; background: rgba(255, 152, 0, 0.05) !important; }
-        
         @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
         .animate-fade { animation: fadeIn 0.6s ease-out forwards; }
     </style>
@@ -166,7 +174,6 @@ def render_swim_lanes_assessment(history_df, current_row, currency):
 
     html_blocks = []
     
-    # 1. CURRENT
     curr_type = current_row.get('NAME_CONTRACT_TYPE', 'Loan')
     curr_amt = current_row.get('AMT_CREDIT', 0)
     pred_val = "Approve" if current_row.get('EXT_SOURCE_3', 0.5) > 0.5 else "Audit"
@@ -182,7 +189,6 @@ def render_swim_lanes_assessment(history_df, current_row, currency):
         </div>
     </div>""")
 
-    # 2. HISTORY
     if not history_df.empty:
         for _, row in history_df.head(10).iterrows(): 
             status = row['NAME_CONTRACT_STATUS']
@@ -216,7 +222,6 @@ def render_swim_lanes_assessment(history_df, current_row, currency):
                  milestones.append(f"""<div class="lane-event"><div class="event-val" style="color:#888">Closed</div></div>""")
 
             status_cls = f"status-{status}" if status in ["Approved", "Refused", "Canceled"] else "status-Pending"
-            
             html_blocks.append(f"""
             <div class="swim-lane {status_cls}">
                 <div class="lane-meta"><div class="lane-title">{ctype}</div><div class="lane-sub">{int(abs(days))} days ago</div></div>
@@ -261,47 +266,25 @@ def create_gauge_chart(value, title, color_hex, text_override=None, target_val=N
         t_color = "#d62728" if target_val == 1 else "#2ca02c"
         fig.add_annotation(x=0.5, y=0.10, text=f"Actual: {t_label}", showarrow=False, font=dict(size=10, color=t_color))
 
-    fig.update_layout(
-        height=120, 
-        margin=dict(l=10, r=10, t=25, b=5),
-        paper_bgcolor='rgba(0,0,0,0)',
-        font={'family': "Segoe UI"}
-    )
+    fig.update_layout(height=120, margin=dict(l=10, r=10, t=25, b=5), paper_bgcolor='rgba(0,0,0,0)', font={'family': "Segoe UI"})
     return fig
 
 def create_exposure_chart(loan_val, exposure_val, currency, label_text):
     fig = go.Figure()
+    fig.add_trace(go.Bar(x=[loan_val], y=[""], orientation='h', marker_color='rgba(255,255,255,0.1)', hoverinfo='none', width=0.6))
     fig.add_trace(go.Bar(
-        x=[loan_val], y=[""], orientation='h',
-        marker_color='rgba(255,255,255,0.1)',
-        hoverinfo='none', width=0.6 
-    ))
-    fig.add_trace(go.Bar(
-        x=[exposure_val], y=[""], orientation='h',
-        marker_color='#d62728', 
+        x=[exposure_val], y=[""], orientation='h', marker_color='#d62728', 
         text=f"{currency}{exposure_val:,.0f}", textposition='auto',
         textfont=dict(color='white', size=13, family="Consolas", weight="bold"),
-        hoverinfo='text', hovertext=f"At Risk: {currency}{exposure_val:,.0f}",
-        width=0.6 
+        hoverinfo='text', hovertext=f"At Risk: {currency}{exposure_val:,.0f}", width=0.6 
     ))
     fig.update_layout(
-        barmode='overlay',
-        xaxis=dict(range=[0, max(loan_val, 1)], visible=False, fixedrange=True),
-        yaxis=dict(visible=False, fixedrange=True),
-        margin=dict(l=0, r=0, t=30, b=15), 
-        height=100, 
+        barmode='overlay', xaxis=dict(range=[0, max(loan_val, 1)], visible=False, fixedrange=True),
+        yaxis=dict(visible=False, fixedrange=True), margin=dict(l=0, r=0, t=30, b=15), height=100, 
         title=dict(text="Est. Exposure (Loan Value at Risk)", font=dict(size=11, color="#aaa", family="Segoe UI"), x=0, y=0.98),
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        showlegend=False
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False
     )
-    fig.add_annotation(
-        x=0, y=-0.5, 
-        text=label_text, 
-        showarrow=False,
-        xanchor='left', yanchor='top',
-        font=dict(size=10, color="#666", family="Consolas")
-    )
+    fig.add_annotation(x=0, y=-0.5, text=label_text, showarrow=False, xanchor='left', yanchor='top', font=dict(size=10, color="#666", family="Consolas"))
     return fig
 
 def render_risk_card(title, value, max_impact, is_bad=True):
@@ -313,17 +296,13 @@ def render_comparison_box(df, metric, applicant_val, title, color="#17a2b8"):
     fig = go.Figure()
     try: plot_data = pd.to_numeric(df[metric], errors='coerce').dropna()
     except: plot_data = df[metric]
-    
     upper = plot_data.quantile(0.98) if pd.api.types.is_numeric_dtype(plot_data) else None
     if upper: plot_data = plot_data[plot_data <= upper]
-
     fig.add_trace(go.Box(x=plot_data, name="Portfolio", orientation='h', marker_color='#444', line_color='#666', boxpoints=False, hoverinfo='x'))
     fig.add_trace(go.Scatter(x=[applicant_val], y=["Portfolio"], mode='markers', marker=dict(size=15, color=color, symbol='diamond', line=dict(width=2, color='white')), name="Applicant", hoverinfo='skip'))
-    
     if pd.api.types.is_numeric_dtype(plot_data):
         mx = max(upper, applicant_val) * 1.1 if upper else applicant_val * 1.1
         fig.update_xaxes(range=[0, mx])
-
     fig.update_layout(title=dict(text=title, font=dict(size=11, color="#aaa")), height=100, margin=dict(l=0, r=0, t=25, b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, xaxis=dict(showgrid=False, zeroline=False, visible=True, tickfont=dict(size=9, color="#666")), yaxis=dict(showgrid=False, visible=False))
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
@@ -342,10 +321,8 @@ def render_system_overview(sig_df):
         marker=dict(size=sig_df['Abs_Norm'] * 2 + 10, color=colors, opacity=0.8, line=dict(width=1, color='white')),
         hovertemplate="<b>%{text}</b><br>Signal: %{x:.1f}<br>Max Risk: %{y:.1%}<extra></extra>"
     ))
-    
     fig.add_annotation(x=-40, y=sig_df['Max_Risk'].max(), text="CRITICAL RISK DRIVERS", showarrow=False, font=dict(color="#d62728", size=10))
     fig.add_annotation(x=40, y=sig_df['Max_Risk'].max(), text="STABILITY ANCHORS", showarrow=False, font=dict(color="#2ca02c", size=10))
-
     fig.update_layout(
         height=500, 
         xaxis=dict(title="Signal Impact (Negative = Risk)", range=[-55, 55], showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
@@ -392,29 +369,47 @@ def show(df):
     )
     st.markdown("---")
     
-    # =========================================================
-    # TAB 1: CATEGORICAL SIGNALS (SPLIT SCREEN WITH CONTAINERS)
-    # =========================================================
     if selected_sub == "Categorical Signals":
+        
+        # 1. LOAD PREFERENCES FOR FILTERING
+        settings = data_engine.load_settings()
+        include_unknown = settings.get("include_unknown", True)
+        
         df = prep_risk_data(df.copy())
+        
+        # 2. CALCULATE SIGNALS WITH FILTER
+        sig_df = calculate_categorical_signals(df, include_unknown=include_unknown)
+        sig_df = sig_df.sort_values('Normalized', ascending=True)
+        sig_df['Visual_Val'] = sig_df['Normalized'].apply(lambda x: 2 if 0 <= x < 2 else (-2 if -2 < x < 0 else x))
+        
         c_left, c_right = st.columns([1, 1], gap="medium")
         with c_left:
             with st.container(border=True): 
                 st.subheader("Signal Strength")
                 st.caption("Normalized impact of categories. Click a bar to drill down.")
-                sig_df = calculate_categorical_signals(df)
-                sig_df = sig_df.sort_values('Normalized', ascending=True)
-                sig_df['Visual_Val'] = sig_df['Normalized'].apply(lambda x: 2 if 0 <= x < 2 else (-2 if -2 < x < 0 else x))
+                
                 max_val = sig_df['Normalized'].abs().max()
                 axis_limit = max(10, max_val * 1.15)
                 fig_sig = go.Figure()
-                fig_sig.add_trace(go.Bar(y=sig_df['Label'], x=sig_df['Visual_Val'], orientation='h', marker=dict(color=sig_df['Normalized'], colorscale=['#d62728', '#444', '#2ca02c'], cmid=0), text=sig_df['Normalized'].apply(lambda x: f"{'+' if x>0 else ''}{x:.1f}"), textposition='auto', width=0.7, hoverinfo='none'))
+                
+                # UPDATED TRACE: Added customdata for robust clicking and hoverinfo='none'
+                fig_sig.add_trace(go.Bar(
+                    y=sig_df['Label'], x=sig_df['Visual_Val'], orientation='h', 
+                    marker=dict(color=sig_df['Normalized'], colorscale=['#d62728', '#444', '#2ca02c'], cmid=0), 
+                    text=sig_df['Normalized'].apply(lambda x: f"{'+' if x>0 else ''}{x:.1f}"), textposition='auto', width=0.7, 
+                    hoverinfo='none', hovertemplate=None,
+                    customdata=sig_df['Feature']
+                ))
+                
                 fig_sig.update_layout(barmode='relative', height=600, xaxis=dict(title="Signal Weight", range=[-axis_limit, axis_limit], zeroline=True, zerolinewidth=2, zerolinecolor='white'), yaxis=dict(title="", showgrid=False, tickfont=dict(size=11), showticklabels=True), margin=dict(l=0, r=0, t=10, b=30), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', clickmode='event+select', showlegend=False)
+                
+                # UPDATED SELECTION: Config hidden toolbar and robust click logic
                 selected = st.plotly_chart(fig_sig, use_container_width=True, on_select="rerun", selection_mode="points", key="sig_chart", config={'displayModeBar': False})
+                
                 active_cat = None
                 if selected and selected["selection"]["points"]:
-                    clicked_idx = selected["selection"]["points"][0]["point_index"]
-                    active_cat = sig_df.iloc[clicked_idx]['Feature']
+                    # Robust lookup using customdata
+                    active_cat = selected["selection"]["points"][0]["customdata"]
 
         with c_right:
             is_hour_cat = active_cat and ("HOUR" in active_cat)
@@ -429,7 +424,13 @@ def show(df):
                     meta = get_meta(active_cat)
                     st.subheader(f"Deep Dive: {meta['label']}")
                     st.markdown(f"*{meta['desc']}*")
+                    
+                    # FILTER UNKNOWN IN DRILLDOWN TOO
                     cat_stats = df.groupby(active_cat).agg(Count=('TARGET', 'count'), Risk=('TARGET', 'mean'), Value=('AMT_CREDIT', 'sum')).reset_index()
+                    if not include_unknown:
+                        exclude_vals = ['XNA', 'Unknown', 'nan']
+                        cat_stats = cat_stats[~cat_stats[active_cat].isin(exclude_vals)]
+
                     if sort_option == "Risk": cat_stats = cat_stats.sort_values('Risk', ascending=True); x_vals = cat_stats[active_cat].astype(str).tolist()
                     elif sort_option == "Volume": cat_stats = cat_stats.sort_values('Count', ascending=False); x_vals = cat_stats[active_cat].astype(str).tolist()
                     else: 
@@ -437,6 +438,7 @@ def show(df):
                         elif "HOUR" in active_cat: cat_stats[active_cat] = pd.to_numeric(cat_stats[active_cat], errors='coerce'); cat_stats = cat_stats.sort_values(active_cat); x_vals = cat_stats[active_cat].tolist()
                         elif "EXT_SOURCE_3_BIN" in active_cat: order = ["1 - Very Low", "2 - Low", "3 - Medium", "4 - High", "5 - Very High"]; cat_stats[active_cat] = pd.Categorical(cat_stats[active_cat], categories=order, ordered=True); cat_stats = cat_stats.sort_values(active_cat); x_vals = cat_stats[active_cat].astype(str).tolist()
                         else: cat_stats = cat_stats.sort_values(active_cat); x_vals = cat_stats[active_cat].astype(str).tolist()
+                    
                     total_n = cat_stats['Count'].sum(); avg_risk = cat_stats['Risk'].mean()
                     st.markdown(f"""<div style="background-color:rgba(255,255,255,0.05); padding:15px; border-radius:8px; border:1px solid rgba(255,255,255,0.1); margin-bottom:20px; display:flex; justify-content:space-around; text-align:center;"><div><div style="color:#888; font-size:0.8em;">APPLICANTS</div><div style="font-size:1.2em; font-weight:bold;">{total_n:,}</div></div><div><div style="color:#888; font-size:0.8em;">AVG RISK</div><div style="font-size:1.2em; font-weight:bold; color:#ff9800;">{avg_risk:.1%}</div></div><div><div style="color:#888; font-size:0.8em;">PORTFOLIO VALUE</div><div style="font-size:1.2em; font-weight:bold;">{currency}{cat_stats['Value'].sum()/1e6:.1f}M</div></div></div>""", unsafe_allow_html=True)
                     fig_det = go.Figure()
@@ -451,15 +453,11 @@ def show(df):
                 else:
                     render_system_overview(sig_df)
 
-    # =========================================================
-    # TAB 2: APPLICANT ASSESSMENT
-    # =========================================================
     elif selected_sub == "Applicant Assessment":
+        # ... [SAME APPLICANT LOGIC AS BEFORE - PRESERVED] ...
         with st.sidebar:
             st.markdown('<div class="sidebar-section">View Options</div>', unsafe_allow_html=True)
             show_profile = st.toggle("Show Applicant Profile", value=True)
-            
-            # UPDATED: Defaults set to False
             show_rel = st.toggle("Show Relationship (History)", value=False) 
             show_portfolio = st.toggle("Show Portfolio Comparison", value=False)
             
@@ -475,7 +473,6 @@ def show(df):
             return
         row = cohort.iloc[0]
         
-        # --- STATE SYNC LOGIC ---
         if 'last_app_id' not in st.session_state or st.session_state['last_app_id'] != search_id:
             st.session_state['last_app_id'] = search_id
             st.session_state['s_age'] = int(row.get('AGE', 30))
@@ -486,13 +483,11 @@ def show(df):
             st.session_state['s_ext3'] = float(row.get('EXT_SOURCE_3', 0.5)) if not pd.isna(row.get('EXT_SOURCE_3')) else 0.5
             st.session_state['s_cred'] = int(row.get('AMT_CREDIT', 100000))
             st.session_state['s_car'] = (row.get('FLAG_OWN_CAR', 'N') == 'Y')
-            
             edu_map = ["Higher education", "Secondary / secondary special", "Lower secondary"]
             curr_edu = row.get('NAME_EDUCATION_TYPE', edu_map[1])
             try: idx_edu = edu_map.index(curr_edu)
             except: idx_edu = 1
             st.session_state['s_edu'] = edu_map[idx_edu]
-
             inc_map = ["Working", "Commercial associate", "State servant", "Pensioner", "Unemployed"]
             curr_inc = row.get('NAME_INCOME_TYPE', "Working")
             try: idx_inc = inc_map.index(curr_inc)
@@ -502,39 +497,30 @@ def show(df):
         if show_profile:
             st.markdown("#### Applicant Profile")
             with st.container(border=True):
-                # Updated to 5 columns
                 dp1, dp2, dp3, dp4, dp5 = st.columns([0.7, 1.3, 1, 1, 1])
                 dp1.metric("Age / Gender", f"{row.get('AGE', 'N/A')} / {row.get('CODE_GENDER', 'N/A')}")
                 edu = row.get('NAME_EDUCATION_TYPE', 'N/A').replace(" / secondary special", "")
                 dp2.metric("Education", edu)
                 dp3.metric("Income Type", row.get('NAME_INCOME_TYPE', 'N/A'))
                 dp4.metric("Total Income", f"{currency}{row.get('AMT_INCOME_TOTAL', 0):,.0f}")
-                
-                # New "Current Status" metric
                 status_val = row.get('NAME_CONTRACT_STATUS', 'Pending')
                 dp5.metric("Current Status", status_val)
 
-        # --- APPLICANT RELATIONSHIP (SWIM LANES) ---
         if show_rel:
             st.write("")
             with st.expander("Applicant Relationship", expanded=True):
                 full_hist = load_full_history()
                 history_df = get_applicant_history(search_id, full_hist)
-                
-                # Metrics (Expanded to 5)
                 rejected_hist = len(history_df[history_df['NAME_CONTRACT_STATUS'] == 'Refused']) if not history_df.empty else 0
                 approved_hist = len(history_df[history_df['NAME_CONTRACT_STATUS'] == 'Approved']) if not history_df.empty else 0
                 total_hist = len(history_df)
-                
                 rel_value = history_df[history_df['NAME_CONTRACT_STATUS'] == 'Approved']['AMT_APPLICATION'].sum() if not history_df.empty else 0
-                
                 m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Historical Applications", total_hist)
                 m2.metric("Past Approvals", approved_hist)
                 m3.metric("Past Rejections", rejected_hist)
                 m4.metric("Relationship Age", f"{abs(int(history_df['DAYS_DECISION'].min())):,} days" if not history_df.empty else "New Client")
                 m5.metric("Relationship Value", f"{currency}{rel_value:,.0f}")
-                
                 render_swim_lanes_assessment(history_df, row, currency)
 
         if show_portfolio:
@@ -669,7 +655,6 @@ def show(df):
                 current_risk_subs += boost_car
                 if boost_car > 0: risk_mitigants.append(("Asset Ownership", boost_car))
 
-        # --- 6. HEADER RENDER WITH GAUGES ---
         final_score = max(0, min(100, base_score + current_risk_adds - current_risk_subs))
         est_exposure = in_cred * (final_score / 100)
         
@@ -709,18 +694,12 @@ def show(df):
         if risk_mitigants: all_factors.append(f"<b>Risk Mitigants:</b> {', '.join([x[0] for x in risk_mitigants])}")
         narrative_details = "<br>".join(all_factors)
         
-        # LOGIC FOR EXPOSURE LABEL
-        if in_cred > 0:
-            exp_label = f"Loan Value: {currency}{in_cred:,.0f}"
-        else:
-            status_val = row.get('NAME_CONTRACT_STATUS', 'Audit')
-            if pd.isna(status_val): status_val = "Audit"
-            exp_label = f"Decision Pending: {status_val}"
+        if in_cred > 0: exp_label = f"Loan Value: {currency}{in_cred:,.0f}"
+        else: exp_label = f"Decision Pending: {row.get('NAME_CONTRACT_STATUS', 'Audit')}"
 
         with header_area.container():
             with st.container(border=True):
                 st.markdown('<div class="animate-fade">', unsafe_allow_html=True)
-                
                 c_text, c_score, c_prob, c_exp = st.columns([2.2, 0.9, 0.9, 0.8])
                 
                 with c_text:
